@@ -445,21 +445,6 @@ def fast_pos_embed_interpolate(self, grid_thw):
     return patch_pos_embeds
 
 
-def _dummy_visual_forward_required(model) -> bool:
-    """Whether a text-only micro-batch still has to run the (unused) vision tower.
-
-    The dummy 16-patch forward exists so that wrappers which insist on every parameter
-    taking part in forward/backward do not error on the untouched vision weights. FSDP
-    (both FSDP1 and fully_shard) tolerates units that never run forward: their flat
-    parameters keep ``grad=None`` and the optimizer skips them, which also means AdamW
-    weight decay is no longer applied to weights that never receive a gradient. Skipping
-    the dummy forward removes 27 vision-block all-gathers, reduce-scatters, flash-attention
-    calls and ~140 host syncs from every micro-batch. Set
-    ``VERL_QWEN3_5_FORCE_DUMMY_VISUAL=1`` to keep the old behaviour.
-    """
-    return os.environ.get("VERL_QWEN3_5_FORCE_DUMMY_VISUAL", "0") == "1"
-
-
 def _get_input_embeds(
     model: "Qwen3_5CausalLMOutputWithPast",
     input_ids: torch.LongTensor,
@@ -506,13 +491,8 @@ def _get_input_embeds(
         video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
         inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
-    if pixel_values is None and pixel_values_videos is None and _dummy_visual_forward_required(model):
-        config = model.config.vision_config
-        patch_dim = config.in_channels * config.temporal_patch_size * config.patch_size**2
-        pixel_values = torch.zeros((16, patch_dim), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-        image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
-        image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw).pooler_output
-        inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
+    # Text-only inputs skip the vision tower entirely; FSDP leaves its untouched units sharded
+    # (grad=None), which is cheaper than the former dummy 16-patch forward on every micro-batch.
 
     if attention_mask is not None:
         attention_mask = attention_mask.to(inputs_embeds.device)
