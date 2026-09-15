@@ -211,7 +211,7 @@ def qwen3_5_gated_delta_net_forward(
     if cu_seqlens is not None:
         if batch_size != 1:
             raise ValueError("Packed Qwen3.5 linear attention expects batch size 1.")
-        total_seq_len = int(cu_seqlens[-1].item())
+        total_seq_len = int((cu_seqlens_cpu if cu_seqlens_cpu is not None else cu_seqlens)[-1].item())
         ulysses_sp_size = get_ulysses_sequence_parallel_world_size()
         if total_seq_len != seq_len:
             if (
@@ -491,13 +491,8 @@ def _get_input_embeds(
         video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
         inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
-    if pixel_values is None and pixel_values_videos is None:
-        config = model.config.vision_config
-        patch_dim = config.in_channels * config.temporal_patch_size * config.patch_size**2
-        pixel_values = torch.zeros((16, patch_dim), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-        image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
-        image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw).pooler_output
-        inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
+    # Text-only inputs skip the vision tower entirely; FSDP leaves its untouched units sharded
+    # (grad=None), which is cheaper than the former dummy 16-patch forward on every micro-batch.
 
     if attention_mask is not None:
         attention_mask = attention_mask.to(inputs_embeds.device)
